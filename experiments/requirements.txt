@@ -1,0 +1,4 @@
+aioquic==1.2.0
+scapy==2.5.0
+iperf3==0.1.11
+psutil==6.0.0
