@@ -1,110 +1,123 @@
 # NetPulse
 
-NetPulse is an interactive lab for comparing QUIC, TCP, and UDP under changing network conditions. It combines a dark, packet-tracer-style topology builder with a FastAPI experiment service and Linux-ready network hooks.
+NetPulse is an interactive, real-time network protocol benchmarking platform designed to measure and compare **TCP**, **UDP**, and **QUIC** under precisely controlled network impairment conditions (bandwidth constraints, latency, and packet loss).
 
-## Current status
+It pairs a modern Next.js topology dashboard with a FastAPI experiment orchestration backend, executing real experiments over **Mininet**, **Open vSwitch (OVS)**, Linux network namespaces, and system-level benchmarking tools.
 
-- The frontend is fully runnable on Windows with simulated experiment metrics.
-- The topology builder uses React Flow: drag devices from the palette, connect `OUT` to `IN`, click a link to assign a protocol, and run the visual simulation.
-- The FastAPI service persists experiments in SQLite by default and streams metric snapshots over WebSockets.
-- `network/` and `experiments/` retain the Linux/Mininet integration seams for the later WSL2 or Ubuntu run.
-- The current TCP, UDP, and QUIC runner modules are clearly marked seams; they return simulation metadata until the Linux binaries and Mininet hosts are enabled.
+---
 
-## Project layout
+## Key Features & Architecture
 
-```text
-frontend/       Next.js dashboard, topology builder, comparison views
-backend/        FastAPI API, SQLAlchemy models, async experiment runner
-experiments/    TCP, UDP, QUIC runner seams and shared metrics logic
-network/        Mininet topology, tc/netem hooks, condition presets
-database/       Portable SQL schema for PostgreSQL/Linux deployment
+- **Real Network Measurements**: Real TCP and UDP throughput, latency, jitter, loss, and CPU utilization measured using system `iperf3` inside isolated Mininet network namespaces.
+- **Controlled Privilege Model**: FastAPI and frontend run entirely non-root; privileged network virtualization operations are delegated to a tightly scoped, root-controlled helper executable (`/usr/local/libexec/netpulse-runner`).
+- **Relational Persistence**: PostgreSQL stores structured experiment runs, metric comparisons, and raw execution outputs.
+- **Live WebSocket Telemetry**: Streaming real-time snapshot metrics from experiment execution to the dashboard.
+- **Topology Builder**: Visual React Flow canvas supporting `h1 ---- s1 ---- s2 ---- h2` Mininet topologies.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Web Browser                            │
+│                 (http://localhost:3000)                     │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ HTTP / WebSocket
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│               FastAPI Backend (:8000)                       │
+│        (Runs as unprivileged user, validates request)       │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Scoped sudo execution
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│    Root Helper: /usr/local/libexec/netpulse-runner          │
+│    ├── Builds isolated Mininet (h1 ── s1 ── s2 ── h2)       │
+│    ├── Spawns iperf3 server on h2                           │
+│    ├── Executes iperf3 client on h1                         │
+│    └── Always tears down topology in finally block          │
+└──────────────┬───────────────────────────────┬──────────────┘
+               │                               │
+               ▼                               ▼
+  ┌────────────────────────┐      ┌────────────────────────┐
+  │ Raw Output Files (.json│      │  PostgreSQL Database   │
+  │    in results/raw/     │      │   (metrics & status)   │
+  └────────────────────────┘      └────────────────────────┘
 ```
 
-## Windows quick start
+---
 
-Open two terminals from the project root.
+## Quick Start (Ubuntu Linux)
 
-### Backend
-
-```powershell
-$env:PYTHONPATH="backend"
-python -m pip install -r backend/requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-### Frontend
-
-```powershell
-cd frontend
-npm install
-npx next dev -H 127.0.0.1 -p 3000
-```
-
-Open:
-
-- Dashboard: http://127.0.0.1:3000
-- Interactive monitor: http://127.0.0.1:3000/live-monitor
-- API health: http://127.0.0.1:8000/health
-- API docs: http://127.0.0.1:8000/docs
-
-## Topology builder
-
-1. Open Live Monitor.
-2. Drag a Client, Switch, or Server from the left palette onto the canvas.
-3. Drag a device's glowing `OUT` port to another device's `IN` port.
-4. Click an edge and choose TCP, UDP, or QUIC in the inspector.
-5. Use `RUN SIMULATION` to start packet animation and trigger the backend experiment endpoint.
-6. Use the speed buttons for visual playback only; they do not change experiment timing.
-7. Double-click a device to rename it. Select a node to inspect connected links.
-
-The default `h1 -> s1 -> s2 -> h2` path is already connected. Extra visual devices are illustrative until the Mininet topology is extended to match them.
-
-## API
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| GET | `/health` | Service health check |
-| POST | `/experiment/start` | Validate and start an experiment |
-| GET | `/experiment/status/{id}` | Read lifecycle status |
-| GET | `/experiment/results/{id}` | Read persisted metrics |
-| GET | `/experiments` | List experiment history |
-| WS | `/ws/experiment/{id}` | Receive live metric snapshots |
-
-Example request:
-
-```json
-{
-	"protocols": ["tcp", "udp", "quic"],
-	"bandwidth_mbps": 25,
-	"latency_ms": 45,
-	"packet_loss_pct": 1,
-	"duration_sec": 10
-}
-```
-
-## Linux / WSL2 handoff
-
-The network layer is intentionally kept separate from the web dependencies. On Ubuntu or WSL2:
+For complete setup and execution details, refer to [docs/RUN_PROJECT.md](docs/RUN_PROJECT.md).
 
 ```bash
-sudo apt update
-sudo apt install -y mininet openvswitch-switch iproute2 iperf3 tcpdump
-python3 -m venv .venv
+# 1. Clone repository
+git clone https://github.com/Kenrich64/Netpulse.git
+cd Netpulse
+
+# 2. Run automated setup script
+./scripts/install_netpulse.sh
+
+# 3. Configure PostgreSQL password in .env
+# Edit .env and update: DATABASE_URL=postgresql://netpulse_user:YOUR_PASSWORD@localhost:5432/netpulse
+
+# 4. Start Backend Server (Terminal 1)
+cd backend
 source .venv/bin/activate
-pip install -r backend/requirements.txt
-pip install -r experiments/requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 5. Start Frontend Dashboard (Terminal 2)
+cd ../frontend
+npm install
+npm run dev
 ```
 
-Linux-only pieces:
+Open your browser at **http://localhost:3000**.
 
-- `network/topology.py` defines `h1 - s1 - s2 - h2` using Mininet.
-- `network/netem.py` applies bandwidth, delay, and packet-loss rules through `tc`.
-- `experiments/tcp/run_tcp_test.py` is the iperf3 TCP integration point.
-- `experiments/udp/run_udp_test.py` is the iperf3 UDP integration point.
-- `experiments/quic/run_quic_test.py` is the aioquic integration point.
+---
 
-The next integration step is to replace the simulated calculations in `backend/app/services/experiment_runner.py` with calls that start the Mininet topology, apply netem to the selected interface, invoke the protocol runner, persist parsed metrics, and always reset the network in a `finally` block.
+## Project Structure
 
-## Generated files
+```text
+Netpulse/
+├── backend/                  # FastAPI application & database models
+│   ├── app/
+│   │   ├── api/routes.py     # REST and WebSocket endpoints
+│   │   ├── db/               # SQLAlchemy models and engine
+│   │   ├── models/schemas.py # Pydantic request/response schemas
+│   │   └── services/         # Experiment runner orchestration
+│   └── requirements.txt      # Python backend dependencies
+├── experiments/              # Protocol runner modules
+│   ├── privileged_helper.py  # Root-controlled Mininet execution helper
+│   ├── tcp/run_tcp_test.py   # Real iperf3 TCP runner
+│   ├── udp/run_udp_test.py   # Real iperf3 UDP runner
+│   └── quic/                 # QUIC protocol modules (Stage 4)
+├── frontend/                 # Next.js 14 web application & topology canvas
+├── network/                  # Mininet topology (h1-s1-s2-h2) & cleanup
+├── database/                 # PostgreSQL DDL schema (schema.sql)
+├── scripts/                  # Reproducible install script (install_netpulse.sh)
+├── docs/                     # Guides: RUN_PROJECT.md, SETUP.md
+└── results/                  # Structured test artifacts
+    ├── raw/                  # Source-of-truth iperf3 JSON dumps
+    ├── processed/            # Extracted metric summaries
+    └── plots/                # Protocol comparison graphs
+```
 
-Do not commit `frontend/.next/`, Python `__pycache__/` folders, or `backend/netpulse.db`. The SQLite database is a local development store; PostgreSQL can be selected later with `DATABASE_URL`.
+---
+
+## Security & Privilege Model
+
+Mininet requires Linux `CAP_NET_ADMIN` to manage Open vSwitch bridges, network namespaces, and virtual ethernet pairs.
+
+To prevent security vulnerabilities:
+1. **FastAPI never runs as root**.
+2. Sudo privileges are never granted to user-writable scripts in project directories.
+3. The privileged executable is installed to `/usr/local/libexec/netpulse-runner`, owned by `root:root` with `0755` permissions.
+4. Sudoers permissions are narrowly scoped via `/etc/sudoers.d/netpulse` allowing only the exact helper executable and `mn -c`.
+5. All experiment parameters (duration, bandwidth, protocol, experiment ID) are strictly validated via type checks and regular expressions before execution.
+
+---
+
+## Documentation Links
+
+- [docs/RUN_PROJECT.md](docs/RUN_PROJECT.md) — Comprehensive execution and troubleshooting guide for team members.
+- [docs/SETUP.md](docs/SETUP.md) — Prerequisites and system dependency installation guide.
+

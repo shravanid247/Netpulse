@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.database import Base
 
@@ -18,6 +18,7 @@ class Experiment(Base):
     packet_loss_pct: Mapped[float] = mapped_column(Float)
     duration_sec: Mapped[int] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     results: Mapped[list[Result]] = relationship(back_populates="experiment", cascade="all, delete-orphan")
@@ -29,8 +30,10 @@ class Result(Base):
     protocol: Mapped[str] = mapped_column(String(8))
     throughput_mbps: Mapped[float] = mapped_column(Float)
     latency_ms: Mapped[float] = mapped_column(Float)
-    jitter_ms: Mapped[float] = mapped_column(Float)
+    jitter_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     packet_loss_pct: Mapped[float] = mapped_column(Float)
     cpu_usage_pct: Mapped[float] = mapped_column(Float)
     transfer_time_sec: Mapped[float] = mapped_column(Float)
+    handshake_success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    raw_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     experiment: Mapped[Experiment] = relationship(back_populates="results")
