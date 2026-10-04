@@ -72,19 +72,30 @@ def verify_connectivity(net: Any) -> dict[str, Any]:
     }
 
 
-def get_topology_info(net: Any) -> dict[str, Any]:
-    """Return structured host, switch, and link metadata."""
-    h1 = net.get("h1")
-    h2 = net.get("h2")
+def get_interswitch_interfaces() -> list[str]:
+    """Return standard interface names for the s1 <-> s2 bottleneck link."""
+    return ["s1-eth2", "s2-eth1"]
+
+
+def measure_ping_latency(h1: Any, target_ip: str = "10.0.0.2", count: int = 5) -> dict[str, Any]:
+    """Measure real ICMP round-trip latency and packet loss between h1 and target."""
+    import re
+    cmd = f"ping -c {count} -W 2 {target_ip}"
+    raw_output = h1.cmd(cmd)
+
+    loss_match = re.search(r"(\d+(?:\.\d+)?)%\s+packet\s+loss", raw_output)
+    rtt_match = re.search(r"rtt\s+min/avg/max/mdev\s*=\s*([\d\.]+)/([\d\.]+)/([\d\.]+)/([\d\.]+)", raw_output)
+
+    loss_pct = float(loss_match.group(1)) if loss_match else 100.0
+    avg_rtt_ms = float(rtt_match.group(2)) if rtt_match else 0.0
+    min_rtt_ms = float(rtt_match.group(1)) if rtt_match else 0.0
+    max_rtt_ms = float(rtt_match.group(3)) if rtt_match else 0.0
+
     return {
-        "hosts": {
-            "h1": {"ip": h1.IP(), "intf": h1.defaultIntf().name},
-            "h2": {"ip": h2.IP(), "intf": h2.defaultIntf().name},
-        },
-        "switches": ["s1", "s2"],
-        "links": [
-            ("h1", "s1"),
-            ("s1", "s2"),
-            ("s2", "h2"),
-        ],
+        "success": loss_pct < 100.0,
+        "loss_pct": loss_pct,
+        "avg_rtt_ms": avg_rtt_ms,
+        "min_rtt_ms": min_rtt_ms,
+        "max_rtt_ms": max_rtt_ms,
+        "raw_output": raw_output.strip(),
     }

@@ -56,11 +56,11 @@ def run_udp_test(
             stderr=subprocess.PIPE,
             text=True,
         )
-        client_stdout, client_stderr = client_proc.communicate(timeout=duration_sec + 15)
+        client_stdout, client_stderr = client_proc.communicate(timeout=max(35, duration_sec + 30))
     finally:
         # Ensure server process terminates
         try:
-            server_proc.wait(timeout=3)
+            server_proc.wait(timeout=4)
         except subprocess.TimeoutExpired:
             server_proc.kill()
 

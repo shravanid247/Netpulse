@@ -106,6 +106,8 @@ class ExperimentRunner:
                 "--protocol", protocol,
                 "--duration", str(config.duration_sec),
                 "--bandwidth", str(config.bandwidth_mbps),
+                "--latency", str(config.latency_ms),
+                "--packet-loss", str(config.packet_loss_pct),
                 "--output-file", str(raw_file),
             ]
 
