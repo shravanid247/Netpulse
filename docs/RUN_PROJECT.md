@@ -1,322 +1,323 @@
-# NetPulse Project Execution & Run Guide
+# NetPulse Execution, Run & Operations Guide
 
-Welcome to **NetPulse** — an automated network protocol benchmarking platform designed to measure and compare real **TCP**, **UDP**, and **QUIC** performance across controlled virtual topologies using Mininet, Open vSwitch, and system-level measurement tools.
+Welcome to the **NetPulse** runtime operations guide. This document provides step-by-step instructions for starting, operating, testing, benchmarking, and troubleshooting the complete NetPulse platform.
 
 ---
 
-## Quick Start for Team Members
+## 1. Starting System Services
 
-If your system already has the prerequisites installed (Ubuntu with Python 3, PostgreSQL, Mininet, Open vSwitch, iperf3):
+Ensure that both PostgreSQL and Open vSwitch are running on your Ubuntu system:
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/Kenrich64/Netpulse.git
-cd Netpulse
+# Check service status
+sudo systemctl status postgresql --no-pager
+sudo systemctl status openvswitch-switch --no-pager
 
-# 2. Run automated setup script (configures venv, dependencies, .env, and helper)
-./scripts/install_netpulse.sh
+# If either service is stopped, start them:
+sudo systemctl start postgresql
+sudo systemctl start openvswitch-switch
+```
 
-# 3. Configure your database password in .env
-# Edit .env and update DATABASE_URL with your PostgreSQL password:
-# DATABASE_URL=postgresql://netpulse_user:YOUR_PASSWORD@localhost:5432/netpulse
+---
 
-# 4. Initialize Database Schema
-cd backend
+## 2. Starting the Application
+
+Running NetPulse requires two active terminals (one for the backend and one for the frontend).
+
+### Terminal 1: FastAPI Backend Server
+
+```bash
+cd ~/Netpulse/backend
+
+# Activate virtual environment
 source .venv/bin/activate
-python3 -c "from app.db.database import create_tables; create_tables(); print('Database tables created successfully!')"
 
-# 5. Start Backend Server (Terminal 1)
+# Optional: Ensure database tables are created
+python3 -c "from app.db.database import create_tables; create_tables()"
+
+# Start FastAPI with live reload on port 8000
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-# 6. Start Frontend Dashboard (Terminal 2)
-cd ../frontend
+Verify backend health:
+```bash
+curl http://localhost:8000/health
+# Response: {"status":"healthy","database":"connected","version":"1.0.0","service":"netpulse-backend"}
+```
+
+- **API Base URL**: `http://localhost:8000`
+- **Interactive Swagger Docs**: `http://localhost:8000/docs`
+- **OpenAPI JSON**: `http://localhost:8000/openapi.json`
+
+---
+
+### Terminal 2: Next.js Frontend Dashboard
+
+```bash
+cd ~/Netpulse/frontend
+
+# Ensure dependencies are installed
 npm install
+
+# Start Next.js development server
 npm run dev
 ```
 
-Open your browser at **http://localhost:3000** to interact with NetPulse.
+Open your browser at **http://localhost:3000**.
 
 ---
 
-## Detailed Step-by-Step Guide
+## 3. Using the Web Dashboard
+
+| Page | URL | Description & Workflow |
+| :--- | :--- | :--- |
+| **Overview** | `http://localhost:3000/` | High-level system overview, active configuration, quick links to other modules. |
+| **Experiment Lab** | `http://localhost:3000/experiment-lab` | Visual Mininet topology canvas (`h1 ---- s1 ---- s2 ---- h2`), protocol selectors (TCP, UDP, QUIC), network preset selector, custom sliders for bandwidth/latency/loss, and execution trigger button. |
+| **Live Monitor** | `http://localhost:3000/live-monitor` | Real-time WebSocket streaming telemetry during an active experiment run. Displays live throughput gauges, latency graphs, packet loss meters, and terminal execution logs. |
+| **Protocol Explorer** | `http://localhost:3000/protocol-explorer` | Interactive timeline charts comparing throughput, latency, jitter, and packet loss across multiple test runs and protocols. |
+| **Comparison Matrix** | `http://localhost:3000/comparison` | Side-by-side metric tables and derived comparative analytics: Throughput Efficiency (%), Throughput Ratio vs. TCP, Latency Inflation, and CPU Cost Efficiency. |
+| **Research Results** | `http://localhost:3000/research-results` | Searchable experiment history table, CSV/JSON dataset export buttons, and raw JSON benchmark artifact inspection modal. |
 
 ---
 
-### A. System Requirements
+## 4. Running Experiments
 
-NetPulse executes **real network namespaces** and **Open vSwitch virtual networks**, requiring a Linux kernel with network isolation capabilities.
-
-- **Operating System**: Ubuntu 22.04 LTS or 24.04 LTS (recommended).
-- **Python**: Python 3.10+ (tested on Python 3.10–3.14).
-- **Database**: PostgreSQL 14+ with `psycopg2` support.
-- **Networking Tools**:
-  - Mininet (`mn` 2.3.0+)
-  - Open vSwitch (`openvswitch-switch` / `ovs-vsctl`)
-  - iperf3 (`iperf3` 3.9+)
-  - Linux Traffic Control (`tc` / `iproute2`)
-- **Frontend Environment**: Node.js 18+ and `npm`.
-
-> [!NOTE]
-> **Windows Users**: Native Windows cannot run Linux network namespaces or Mininet. Windows users must run NetPulse inside an **Ubuntu Virtual Machine** (e.g. VirtualBox, VMware) or a Linux secondary boot. WSL2 requires custom kernel compilation for Open vSwitch and is not recommended over a standard VM.
+You can run experiments either through the **Web Dashboard UI**, via the **FastAPI REST API**, or directly using the **Privileged CLI Helper**.
 
 ---
 
-### B. Clone the Project
+### Method A: Via Web Dashboard (Recommended)
 
-```bash
-git clone https://github.com/Kenrich64/Netpulse.git
-cd Netpulse
-```
-
----
-
-### C. Check System Dependencies
-
-Verify all required command-line utilities:
-
-```bash
-python3 --version     # Expected: Python 3.10+
-git --version         # Expected: git version 2.x+
-psql --version        # Expected: psql (PostgreSQL) 14+
-mn --version          # Expected: 2.3.0 or higher
-ovs-vsctl --version   # Expected: ovs-vsctl (Open vSwitch) 2.17+ / 3.x+
-iperf3 --version      # Expected: iperf 3.x+
-tc -V                 # Expected: tc utility, iproute2-ss...
-ip -V                 # Expected: ip utility, iproute2-ss...
-```
-
-If any tool is missing, install the required packages:
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git postgresql mininet openvswitch-switch iperf3 iproute2
-```
+1. Open `http://localhost:3000/experiment-lab` in your browser.
+2. Select your desired protocols: **TCP**, **UDP**, and/or **QUIC**.
+3. Choose a network condition preset (e.g., **Home Broadband**, **4G LTE**, **Satellite**, **Fiber**, **Poor WAN**) OR configure custom impairment:
+   - **Bandwidth**: `1.0` – `1000.0` Mbps
+   - **Latency (RTT)**: `0.0` – `600.0` ms
+   - **Packet Loss**: `0.0` – `15.0` %
+   - **Duration**: `3` – `30` seconds
+4. Click **"Run Experiment"**.
+5. The dashboard will automatically transition or stream metrics to the **Live Monitor** (`/live-monitor`), recording results to PostgreSQL and writing raw JSON artifacts to `results/raw/`.
 
 ---
 
-### D. Database Setup
+### Method B: Via Privileged CLI Helper (`netpulse-runner`)
 
-Configure a local PostgreSQL database and user:
+The root helper can be run directly from the command line for fast manual benchmarking and scripting:
 
-1. **Log in to PostgreSQL as superuser**:
-   ```bash
-   sudo -u postgres psql
-   ```
-
-2. **Create the user and database** (replace `CHANGE_ME` with your preferred secure password):
-   ```sql
-   CREATE USER netpulse_user WITH PASSWORD 'CHANGE_ME';
-   CREATE DATABASE netpulse OWNER netpulse_user;
-   GRANT ALL PRIVILEGES ON DATABASE netpulse TO netpulse_user;
-   \c netpulse
-   GRANT ALL ON SCHEMA public TO netpulse_user;
-   \q
-   ```
-
-3. **Configure connection string in `.env`**:
-   Copy `.env.example` to `.env` if not already present:
-   ```bash
-   cp .env.example .env
-   ```
-   Update `DATABASE_URL` in `.env`:
-   ```ini
-   DATABASE_URL=postgresql://netpulse_user:CHANGE_ME@localhost:5432/netpulse
-   ```
-
-4. **Initialize tables**:
-   ```bash
-   cd backend
-   source .venv/bin/activate
-   python3 -c "from app.db.database import create_tables; create_tables(); print('Tables ready!')"
-   ```
-
----
-
-### E. Backend Setup
-
-```bash
-cd backend
-
-# Create and activate Python virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install backend dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
----
-
-### F. Privilege & NetPulse Runner Setup
-
-#### Security Architecture
-- **FastAPI runs as your regular non-root user**.
-- Privileged operations (creating network namespaces, Open vSwitch bridges, and virtual ethernet pairs) are delegated to a single root-owned helper executable located outside user directories at `/usr/local/libexec/netpulse-runner`.
-- Sudo access is strictly restricted to that single binary and the Mininet cleanup utility.
-
-#### Installation of the Privileged Helper
-```bash
-# 1. Install root-owned helper
-sudo mkdir -p /usr/local/libexec
-sudo cp experiments/privileged_helper.py /usr/local/libexec/netpulse-runner
-sudo chown root:root /usr/local/libexec/netpulse-runner
-sudo chmod 0755 /usr/local/libexec/netpulse-runner
-
-# 2. Grant scoped sudo permission for your current user
-echo "$(id -un) ALL=(root) NOPASSWD: /usr/local/libexec/netpulse-runner, /usr/bin/mn -c" | sudo tee /etc/sudoers.d/netpulse
-sudo chmod 0440 /etc/sudoers.d/netpulse
-
-# 3. Validate sudoers syntax
-sudo visudo -c -f /etc/sudoers.d/netpulse
-```
-
----
-
-### G. Basic Network Test
-
-Verify that Mininet can instantiate the 2-host, 2-switch virtual network topology:
-
+#### 1. Verify Topology Connectivity (h1 <-> h2)
 ```bash
 sudo /usr/local/libexec/netpulse-runner --action verify
 ```
 
-**Expected JSON output**:
+#### 2. Test Real Linux `tc/netem` Impairment Injection
+```bash
+sudo /usr/local/libexec/netpulse-runner \
+  --action impairment_test \
+  --bandwidth 25 \
+  --latency 50 \
+  --packet-loss 2
+```
+
+#### 3. Run Real TCP Experiment
+```bash
+sudo /usr/local/libexec/netpulse-runner \
+  --action run \
+  --experiment-id EXP-MANUAL-TCP \
+  --protocol tcp \
+  --duration 5 \
+  --bandwidth 100 \
+  --latency 20 \
+  --packet-loss 0.5
+```
+Output JSON artifact is written to `results/raw/EXP-MANUAL-TCP_tcp.json`.
+
+#### 4. Run Real UDP Experiment
+```bash
+sudo /usr/local/libexec/netpulse-runner \
+  --action run \
+  --experiment-id EXP-MANUAL-UDP \
+  --protocol udp \
+  --duration 5 \
+  --bandwidth 50 \
+  --latency 45 \
+  --packet-loss 1.0
+```
+Output JSON artifact is written to `results/raw/EXP-MANUAL-UDP_udp.json`.
+
+#### 5. Run Real QUIC Experiment
+```bash
+sudo /usr/local/libexec/netpulse-runner \
+  --action run \
+  --experiment-id EXP-MANUAL-QUIC \
+  --protocol quic \
+  --duration 5 \
+  --bandwidth 100 \
+  --latency 20 \
+  --packet-loss 1.0
+```
+Output JSON artifact is written to `results/raw/EXP-MANUAL-QUIC_quic.json`.
+
+---
+
+### Method C: Via REST API (`curl`)
+
+Trigger a multi-protocol experiment via the FastAPI backend:
+
+```bash
+curl -X POST http://localhost:8000/experiment/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "protocols": ["tcp", "udp", "quic"],
+    "bandwidth_mbps": 50.0,
+    "latency_ms": 30.0,
+    "packet_loss_pct": 1.5,
+    "duration_sec": 5
+  }'
+```
+
+**Response**:
 ```json
 {
-  "success": true,
-  "action": "verify",
-  "ping_loss": 0.0,
-  "nodes": [
-    "h1",
-    "h2",
-    "s1",
-    "s2"
-  ]
+  "id": "EXP-XXXXXX",
+  "status": "QUEUED",
+  "protocols": ["tcp", "udp", "quic"],
+  "bandwidth_mbps": 50.0,
+  "latency_ms": 30.0,
+  "packet_loss_pct": 1.5,
+  "duration_sec": 5,
+  "created_at": "..."
 }
 ```
 
----
-
-### H. Run Real TCP Experiment
-
-Execute a real TCP throughput test over the Mininet topology:
-
+#### Check Experiment Status & Results:
 ```bash
-sudo /usr/local/libexec/netpulse-runner --action run --experiment-id manual_tcp_01 --protocol tcp --duration 5 --bandwidth 100
+curl http://localhost:8000/experiment/EXP-XXXXXX
 ```
 
-- **Raw JSON output location**: `results/raw/manual_tcp_01_tcp.json`
-- **Output metrics**: Throughput (Mbps), Retransmissions, CPU utilization, Transfer time.
-
----
-
-### I. Run Real UDP Experiment
-
-Execute a real UDP test measuring bandwidth, jitter, and packet loss:
-
+#### Export Structured Results (CSV):
 ```bash
-sudo /usr/local/libexec/netpulse-runner --action run --experiment-id manual_udp_01 --protocol udp --duration 5 --bandwidth 50
+curl "http://localhost:8000/experiment/export/EXP-XXXXXX?format=csv" -o exp_results.csv
 ```
 
-- **Raw JSON output location**: `results/raw/manual_udp_01_udp.json`
-- **Output metrics**: Throughput (Mbps), Jitter (ms), Packet Loss (%), CPU utilization.
+#### Export Structured Results (JSON):
+```bash
+curl "http://localhost:8000/experiment/export/EXP-XXXXXX?format=json" -o exp_results.json
+```
+
+#### Inspect Raw Protocol Benchmark Output:
+```bash
+curl "http://localhost:8000/experiment/raw/EXP-XXXXXX/tcp"
+curl "http://localhost:8000/experiment/raw/EXP-XXXXXX/quic"
+```
 
 ---
 
-### J. Start FastAPI Backend
+## 5. Execution Modes: Simulation vs. Real
+
+The backend behavior is governed by the `NETPULSE_EXECUTION_MODE` variable in `.env`:
+
+| Mode | Configuration | Description |
+| :--- | :--- | :--- |
+| **`simulation`** | `NETPULSE_EXECUTION_MODE=simulation` | Generates realistic, deterministic mock metrics mathematically conditioned on impairment parameters. Does **not** invoke sudo or Mininet. Useful for UI development, rapid prototyping, and automated CI pipelines. |
+| **`real`** | `NETPULSE_EXECUTION_MODE=real` | Invokes `/usr/local/libexec/netpulse-runner` under scoped sudo to construct real Mininet topologies, configure `tc/netem` qdiscs, and run live `iperf3` and `aioquic` benchmarks. |
+
+To switch modes, edit `~/Netpulse/.env` and restart the backend.
+
+---
+
+## 6. Running Tests
+
+### Complete Python Test Suite
+Run the full 45-test suite covering units, API routes, database models, Mininet integration, QUIC execution, and analytics:
 
 ```bash
-cd backend
+cd ~/Netpulse/backend
 source .venv/bin/activate
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+cd ~/Netpulse
+
+python3 -m unittest discover -s tests
 ```
 
-- API Base URL: `http://localhost:8000`
-- Interactive API Documentation (Swagger): `http://localhost:8000/docs`
-- Health Check: `http://localhost:8000/health`
+### Running Individual Test Modules
+```bash
+# 1. Unit tests for impairment presets
+python3 -m unittest tests/test_presets_unit.py
+
+# 2. Unit tests for Linux tc/netem command construction
+python3 -m unittest tests/test_netem_unit.py
+
+# 3. Pipeline integration tests (WebSocket, SQLite/Postgres fallback, REST routes)
+python3 -m unittest tests/test_stage5_pipeline.py
+
+# 4. QUIC protocol tests (TLS 1.3 cert generation, server/client handshake, loss recovery)
+python3 -m unittest tests/test_stage6_quic.py
+
+# 5. Research analytics and data export tests
+python3 -m unittest tests/test_stage7_research.py
+
+# 6. Real Mininet & tc/netem integration tests (requires root helper)
+python3 -m unittest tests/test_netem_integration.py
+```
+
+### Frontend Validation & Production Build
+```bash
+cd ~/Netpulse/frontend
+
+# Run ESLint
+npm run lint
+
+# Run TypeScript compilation check
+npx tsc --noEmit
+
+# Test production build
+npm run build
+```
 
 ---
 
-### K. Start Next.js Frontend
+## 7. Stopping Services & Cleanup
 
-In a separate terminal:
+### Stopping Backend & Frontend
+Press `Ctrl + C` in both active terminal windows.
+
+### Cleaning Up Lingering Mininet Resources
+If an experiment is interrupted unexpectedly, Mininet virtual interfaces (`s1-eth*`, `h1-eth0`) or Open vSwitch flows might remain in the Linux kernel:
 
 ```bash
-cd frontend
-npm install
-npm run dev
-```
-
-- Frontend URL: `http://localhost:3000`
-
----
-
-### L. End-to-End Workflow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Web Browser                            │
-│                 (http://localhost:3000)                     │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ HTTP / WebSocket
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│               FastAPI Backend (:8000)                       │
-│        (Runs as unprivileged user, validates request)       │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Scoped sudo execution
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│    Root Helper: /usr/local/libexec/netpulse-runner          │
-│    ├── Builds isolated Mininet (h1 ── s1 ── s2 ── h2)       │
-│    ├── Spawns iperf3 server on h2                           │
-│    ├── Executes iperf3 client on h1                         │
-│    └── Always tears down topology in finally block          │
-└──────────────┬───────────────────────────────┬──────────────┘
-               │                               │
-               ▼                               ▼
-  ┌────────────────────────┐      ┌────────────────────────┐
-  │ Raw Output Files (.json│      │  PostgreSQL Database   │
-  │    in results/raw/     │      │   (metrics & status)   │
-  └────────────────────────┘      └────────────────────────┘
-```
-
----
-
-### M. Troubleshooting
-
-| Symptom | Check Command | Likely Cause | Fix | Verification |
-| :--- | :--- | :--- | :--- | :--- |
-| **Database connection refused** | `systemctl status postgresql` | PostgreSQL service stopped | `sudo systemctl start postgresql` | Run `check_db_connection()` script |
-| **Mininet permission denied** | `sudo -l` | User lacks sudoers entry | Check `/etc/sudoers.d/netpulse` | Run `sudo /usr/local/libexec/netpulse-runner --action verify` |
-| **Open vSwitch error** | `systemctl status openvswitch-switch` | OVS daemon not running | `sudo systemctl start openvswitch-switch` | `ovs-vsctl show` returns clean state |
-| **Missing iperf3 binary** | `which iperf3` | Package not installed | `sudo apt install -y iperf3` | `iperf3 --version` |
-| **Lingering Mininet interfaces**| `ip link show` | Abrupt test termination | `sudo mn -c` | `ip link show` shows no orphan `s1-eth*` |
-| **Port 8000 in use** | `lsof -i :8000` | Stale backend process | Kill existing process: `kill -9 <PID>` | Restart `uvicorn` |
-| **Port 3000 in use** | `lsof -i :3000` | Stale Next.js process | Kill existing process: `kill -9 <PID>` | Restart `npm run dev` |
-| **CORS errors in browser** | Check browser console | CORS origin mismatch in `.env` | Set `CORS_ORIGIN=http://localhost:3000` in `.env` | Reload browser |
-| **ModuleNotFoundError: psycopg** | `python3 -c "import psycopg2"` | Missing driver | `pip install psycopg2-binary` | `python3 -c "import psycopg2"` |
-| **Database schema missing** | `psql -U netpulse_user -d netpulse -c "\dt"` | Tables not migrated | Run `python3 -c "from app.db.database import create_tables; create_tables()"` | `\dt` shows `experiments` and `results` |
-| **Sudoers syntax error** | `sudo visudo -c` | Corrupted rule file | `sudo rm /etc/sudoers.d/netpulse` and reinstall | `sudo visudo -c` passes |
-| **Helper not found** | `ls -l /usr/local/libexec/netpulse-runner` | Helper not installed | Run `./scripts/install_netpulse.sh` or copy manually | Executable exists with 0755 |
-
----
-
-### N. Cleanup
-
-To clean lingering Mininet namespaces, switches, or iperf3 processes at any time:
-
-```bash
+# Clean Mininet state
 sudo mn -c
+
+# OR clean via the privileged helper
+sudo /usr/local/libexec/netpulse-runner --action cleanup
+```
+
+### Freeing Occupied Ports
+If port `8000` (FastAPI), `3000` (Next.js), or `5201` (iperf3) remains occupied:
+
+```bash
+# Find and kill process on port 8000
+sudo lsof -t -i :8000 | xargs -r kill -9
+
+# Find and kill process on port 3000
+sudo lsof -t -i :3000 | xargs -r kill -9
+
+# Terminate lingering iperf3 daemons
+sudo killall -9 iperf3 2>/dev/null || true
 ```
 
 ---
 
-### O. Reset & Uninstall
+## 8. Comprehensive Troubleshooting Matrix
 
-To remove the installed root helper and sudoers rule cleanly:
-
-```bash
-sudo rm -f /etc/sudoers.d/netpulse
-sudo rm -f /usr/local/libexec/netpulse-runner
-```
+| Issue | Root Cause | Diagnosis Command | Resolution |
+| :--- | :--- | :--- | :--- |
+| **`Connection refused` on :8000** | FastAPI backend is not running | `curl http://localhost:8000/health` | Start backend with `uvicorn app.main:app --reload --port 8000` in `backend/` venv. |
+| **`PostgreSQL connection failed`** | PostgreSQL daemon is inactive or password in `.env` is incorrect | `sudo systemctl status postgresql` | Run `sudo systemctl start postgresql` and verify `DATABASE_URL` credentials in `.env`. |
+| **`Mininet: Cannot find default OpenFlow controller`** | Direct `mn` command run without standalone switch configuration | `sudo mn` without flags | Use `sudo /usr/local/libexec/netpulse-runner` which configures `OVSSwitch` with `failMode="standalone"`. |
+| **`sudo: /usr/local/libexec/netpulse-runner: command not found`** | Root helper has not been copied to target system location | `ls -la /usr/local/libexec/netpulse-runner` | Run `./scripts/update_helper.sh` or copy `experiments/privileged_helper.py` to `/usr/local/libexec/netpulse-runner` with `chmod 0755`. |
+| **`sudo: a password is required`** | Sudoers rule is missing or user mismatch in `/etc/sudoers.d/netpulse` | `sudo -l` | Run `echo "$(id -un) ALL=(root) NOPASSWD: /usr/local/libexec/netpulse-runner, /usr/bin/mn -c" \| sudo tee /etc/sudoers.d/netpulse && sudo chmod 0440 /etc/sudoers.d/netpulse`. |
+| **`Frontend CORS error` in browser console** | `CORS_ORIGIN` in `.env` does not match frontend address | Check browser DevTools console | Ensure `.env` contains `CORS_ORIGIN=http://localhost:3000` and restart backend. |
+| **`ModuleNotFoundError: No module named 'aioquic'`** | Backend virtual environment is inactive or dependencies missing | `which python3` | Ensure `source .venv/bin/activate` is run and execute `pip install -r requirements.txt`. |
+| **`QUIC handshake failed: certificate verify failed`** | Stale or invalid TLS certificates | Check backend logs | NetPulse automatically generates SAN-validated ephemeral certificates for `10.0.0.2`. Ensure `experiments/quic/certs.py` is present. |
+| **`iperf3: error - unable to connect to server`** | Lingering iperf3 server on host or port conflict | `ps aux \| grep iperf3` | Run `sudo killall -9 iperf3` and `sudo mn -c`. |
+| **`tc: Cannot find device "s1-eth2"`** | Network namespace or switch link not created yet | `ip link show` | Ensure Mininet network is started before invoking `tc` (the privileged helper handles this ordering automatically). |

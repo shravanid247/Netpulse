@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Protocol = Literal["tcp", "udp", "quic"]
@@ -50,3 +50,48 @@ class ExperimentResponse(BaseModel):
     results: list[ResultResponse] = []
     raw_result_path: str | None = None
     error: str | None = None
+
+class PresetItem(BaseModel):
+    bandwidth_mbps: float
+    latency_ms: float
+    packet_loss_pct: float
+
+class ProtocolMetrics(BaseModel):
+    protocol: str
+    throughput_mbps: float
+    latency_ms: float
+    jitter_ms: float | None = None
+    packet_loss_pct: float
+    cpu_usage_pct: float
+    transfer_time_sec: float
+    handshake_success: bool | None = None
+    throughput_efficiency_pct: float | None = None
+    throughput_ratio_vs_tcp: float | None = None
+    latency_inflation_pct: float | None = None
+    cpu_cost_per_mbps: float | None = None
+
+class ComparisonSummary(BaseModel):
+    fastest_protocol: str | None = None
+    lowest_latency_protocol: str | None = None
+    most_cpu_efficient: str | None = None
+    protocol_count: int = 0
+    notes: list[str] = []
+
+class ComparisonResponse(BaseModel):
+    experiment_id: str
+    status: str
+    config: ExperimentRequest
+    protocols: dict[str, ProtocolMetrics] = {}
+    summary: ComparisonSummary
+
+class ExperimentSummaryItem(BaseModel):
+    experiment_id: str
+    status: str
+    protocols: list[str]
+    bandwidth_mbps: float | None = None
+    latency_ms: float | None = None
+    packet_loss_pct: float | None = None
+    duration_sec: int | None = None
+    created_at: str | None = None
+    completed_at: str | None = None
+    results_summary: list[dict[str, Any]] = []
