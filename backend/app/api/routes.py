@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.db.database import check_db_connection, get_db
 from app.db.models import Experiment
 from app.models.schemas import ExperimentRequest, ExperimentResponse, ResultResponse
+from app.services.experiment_runner import runner
 
 router = APIRouter()
 
@@ -25,7 +26,7 @@ def health_db(response: Response) -> dict[str, str]:
     return {"status": "ok", "database": "connected"}
 
 @router.post("/experiment/start", status_code=status.HTTP_201_CREATED)
-def start_experiment(
+async def start_experiment(
     request: ExperimentRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
@@ -41,6 +42,7 @@ def start_experiment(
     )
     db.add(experiment)
     db.commit()
+    runner.start(experiment_id, request)
     return {"experiment_id": experiment_id, "status": "PENDING"}
 
 def get_experiment_or_404(experiment_id: str, db: Session) -> Experiment:

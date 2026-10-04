@@ -32,6 +32,7 @@ class ExperimentRunner:
     def __init__(self) -> None:
         self.subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         self.tasks: set[asyncio.Task[None]] = set()
+        self._lock = asyncio.Lock()
 
     @property
     def execution_mode(self) -> str:
@@ -56,38 +57,42 @@ class ExperimentRunner:
         self.subscribers.get(experiment_id, set()).discard(queue)
 
     async def run(self, experiment_id: str, config: ExperimentRequest) -> None:
-        session = SessionLocal()
-        experiment = session.get(Experiment, experiment_id)
-        if experiment is None:
-            session.close()
-            return
+        # Protect Mininet and traffic control resources from concurrent runs
+        async with self._lock:
+            session = SessionLocal()
+            experiment = session.get(Experiment, experiment_id)
+            if experiment is None:
+                session.close()
+                return
 
-        try:
-            experiment.status = "RUNNING"
-            session.commit()
+            try:
+                experiment.status = "RUNNING"
+                session.commit()
 
-            if self.execution_mode == "real":
-                await self._run_real(experiment, config, session)
-            else:
-                await self._run_simulation(experiment, config, session)
+                if self.execution_mode == "real":
+                    await self._run_real(experiment, config, session)
+                else:
+                    await self._run_simulation(experiment, config, session)
 
-            experiment.status = "COMPLETE"
-            experiment.completed_at = datetime.now(timezone.utc)
-            session.commit()
-            await self.publish(experiment_id, {"type": "complete", "experiment_id": experiment_id, "status": "COMPLETE"})
-        except asyncio.CancelledError:
-            experiment.status = "FAILED"
-            experiment.error = "Experiment cancelled"
-            session.commit()
-            raise
-        except Exception as error:
-            logger.exception("Experiment execution failed: %s", error)
-            experiment.status = "FAILED"
-            experiment.error = str(error)
-            session.commit()
-            await self.publish(experiment_id, {"type": "error", "experiment_id": experiment_id, "status": "FAILED", "error": str(error)})
-        finally:
-            session.close()
+                experiment.status = "COMPLETE"
+                experiment.completed_at = datetime.now(timezone.utc)
+                session.commit()
+                await self.publish(experiment_id, {"type": "complete", "experiment_id": experiment_id, "status": "COMPLETE"})
+            except asyncio.CancelledError:
+                logger.warning("Experiment %s was cancelled", experiment_id)
+                experiment.status = "FAILED"
+                experiment.error = "Experiment cancelled"
+                session.commit()
+                await self.publish(experiment_id, {"type": "error", "experiment_id": experiment_id, "status": "FAILED", "error": "Experiment cancelled"})
+                raise
+            except Exception as error:
+                logger.exception("Experiment execution failed for %s: %s", experiment_id, error)
+                experiment.status = "FAILED"
+                experiment.error = str(error)
+                session.commit()
+                await self.publish(experiment_id, {"type": "error", "experiment_id": experiment_id, "status": "FAILED", "error": str(error)})
+            finally:
+                session.close()
 
     async def _run_real(self, experiment: Experiment, config: ExperimentRequest, session: Any) -> None:
         """Execute real Mininet + iperf3 experiments via the privileged helper."""
@@ -95,71 +100,118 @@ class ExperimentRunner:
         saved_paths: list[str] = []
         helper_base_cmd = get_helper_command()
 
-        for protocol in config.protocols:
-            if protocol == "quic":
-                raise NotImplementedError("QUIC protocol real execution is scheduled for Stage 4")
+        try:
+            for protocol in config.protocols:
+                if protocol == "quic":
+                    raise NotImplementedError(
+                        "QUIC protocol is currently unsupported in real execution mode "
+                        "(aioquic/dependencies not installed; fake measurements are strictly forbidden)"
+                    )
 
-            raw_file = RAW_RESULTS_DIR / f"{experiment.id}_{protocol}.json"
-            cmd = helper_base_cmd + [
-                "--action", "run",
-                "--experiment-id", experiment.id,
-                "--protocol", protocol,
-                "--duration", str(config.duration_sec),
-                "--bandwidth", str(config.bandwidth_mbps),
-                "--latency", str(config.latency_ms),
-                "--packet-loss", str(config.packet_loss_pct),
-                "--output-file", str(raw_file),
-            ]
+                raw_file = RAW_RESULTS_DIR / f"{experiment.id}_{protocol}.json"
+                cmd = helper_base_cmd + [
+                    "--action", "run",
+                    "--experiment-id", experiment.id,
+                    "--protocol", protocol,
+                    "--duration", str(config.duration_sec),
+                    "--bandwidth", str(config.bandwidth_mbps),
+                    "--latency", str(config.latency_ms),
+                    "--packet-loss", str(config.packet_loss_pct),
+                    "--output-file", str(raw_file),
+                ]
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_bytes, stderr_bytes = await proc.communicate()
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=max(45, config.duration_sec + 35),
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    raise RuntimeError(f"Helper timed out for protocol {protocol}")
 
-            if proc.returncode != 0:
-                err_text = stderr_bytes.decode().strip() or stdout_bytes.decode().strip()
-                raise RuntimeError(f"Helper failed for protocol {protocol} (exit code {proc.returncode}): {err_text}")
+                if proc.returncode != 0:
+                    err_text = stderr_bytes.decode().strip() or stdout_bytes.decode().strip()
+                    # Handle transient iperf3 UDP control socket timeout under heavy link loss
+                    if "Resource temporarily unavailable" in err_text:
+                        logger.warning("iperf3 transient socket error for %s; cleaning and retrying once...", protocol)
+                        cleanup_cmd = helper_base_cmd + ["--action", "cleanup"]
+                        clean_retry = await asyncio.create_subprocess_exec(
+                            *cleanup_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                        )
+                        await asyncio.wait_for(clean_retry.wait(), timeout=15)
+                        await asyncio.sleep(1.0)
 
+                        retry_proc = await asyncio.create_subprocess_exec(
+                            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                        )
+                        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                            retry_proc.communicate(), timeout=max(45, config.duration_sec + 35)
+                        )
+                        if retry_proc.returncode != 0:
+                            err_text = stderr_bytes.decode().strip() or stdout_bytes.decode().strip()
+                            raise RuntimeError(f"Helper failed for protocol {protocol} (exit code {retry_proc.returncode}): {err_text}")
+                    else:
+                        raise RuntimeError(f"Helper failed for protocol {protocol} (exit code {proc.returncode}): {err_text}")
+
+                try:
+                    result_data = json.loads(stdout_bytes.decode())
+                except json.JSONDecodeError as err:
+                    raise RuntimeError(f"Failed to parse helper output for {protocol}: {err}")
+
+                raw_output = result_data.get("raw_output")
+                result_obj = Result(
+                    experiment_id=experiment.id,
+                    protocol=protocol,
+                    throughput_mbps=result_data.get("throughput_mbps", 0.0),
+                    latency_ms=result_data.get("latency_ms", 0.0),
+                    jitter_ms=result_data.get("jitter_ms"),
+                    packet_loss_pct=result_data.get("packet_loss_pct", 0.0),
+                    cpu_usage_pct=result_data.get("cpu_usage_pct", 0.0),
+                    transfer_time_sec=result_data.get("transfer_time_sec", float(config.duration_sec)),
+                    handshake_success=result_data.get("handshake_success"),
+                    raw_output=raw_output,
+                )
+                session.add(result_obj)
+                saved_paths.append(str(raw_file))
+
+                # Publish final snapshot for this protocol
+                await self.publish(experiment.id, MetricSnapshot(
+                    experiment_id=experiment.id,
+                    protocol=protocol,
+                    elapsed_sec=float(config.duration_sec),
+                    packets_sent=int(result_data.get("throughput_mbps", 0.0) * 125000 * config.duration_sec),
+                    packets_received=int(result_data.get("throughput_mbps", 0.0) * 125000 * config.duration_sec * (1 - result_data.get("packet_loss_pct", 0.0) / 100)),
+                    throughput_mbps=result_data.get("throughput_mbps", 0.0),
+                    latency_ms=result_data.get("latency_ms", 0.0),
+                    packet_loss_pct=result_data.get("packet_loss_pct", 0.0),
+                ))
+
+            if saved_paths:
+                experiment.raw_result_path = ";".join(saved_paths)
+        finally:
+            # Guarantee Mininet and traffic control cleanup runs even on error or cancellation
+            cleanup_cmd = helper_base_cmd + ["--action", "cleanup"]
             try:
-                result_data = json.loads(stdout_bytes.decode())
-            except json.JSONDecodeError as err:
-                raise RuntimeError(f"Failed to parse helper output for {protocol}: {err}")
-
-            raw_output = result_data.get("raw_output")
-            result_obj = Result(
-                experiment_id=experiment.id,
-                protocol=protocol,
-                throughput_mbps=result_data.get("throughput_mbps", 0.0),
-                latency_ms=result_data.get("latency_ms", 0.0),
-                jitter_ms=result_data.get("jitter_ms"),
-                packet_loss_pct=result_data.get("packet_loss_pct", 0.0),
-                cpu_usage_pct=result_data.get("cpu_usage_pct", 0.0),
-                transfer_time_sec=result_data.get("transfer_time_sec", float(config.duration_sec)),
-                handshake_success=result_data.get("handshake_success"),
-                raw_output=raw_output,
-            )
-            session.add(result_obj)
-            saved_paths.append(str(raw_file))
-
-            # Publish final snapshot for this protocol
-            await self.publish(experiment.id, MetricSnapshot(
-                experiment_id=experiment.id,
-                protocol=protocol,
-                elapsed_sec=float(config.duration_sec),
-                packets_sent=int(result_data.get("throughput_mbps", 0.0) * 125000 * config.duration_sec),
-                packets_received=int(result_data.get("throughput_mbps", 0.0) * 125000 * config.duration_sec * (1 - result_data.get("packet_loss_pct", 0.0) / 100)),
-                throughput_mbps=result_data.get("throughput_mbps", 0.0),
-                latency_ms=result_data.get("latency_ms", 0.0),
-                packet_loss_pct=result_data.get("packet_loss_pct", 0.0),
-            ))
-
-        if saved_paths:
-            experiment.raw_result_path = ";".join(saved_paths)
+                clean_proc = await asyncio.create_subprocess_exec(
+                    *cleanup_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(clean_proc.wait(), timeout=15)
+            except Exception as clean_err:
+                logger.warning("Cleanup command error: %s", clean_err)
+            # Allow virtual interfaces and OVS kernel datapath to settle before next experiment
+            await asyncio.sleep(1.0)
 
     async def _run_simulation(self, experiment: Experiment, config: ExperimentRequest, session: Any) -> None:
         """Run simulated experiment metrics."""
+        RAW_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         for elapsed in range(config.duration_sec + 1):
             if elapsed:
                 await asyncio.sleep(1)
@@ -173,6 +225,7 @@ class ExperimentRunner:
                     latency_ms=config.latency_ms, packet_loss_pct=config.packet_loss_pct,
                 ))
 
+        sim_paths = []
         for protocol in config.protocols:
             jitter = round(config.latency_ms * 0.08, 2) if protocol == "udp" else None
             handshake_ok = True if protocol == "quic" else None
@@ -181,7 +234,14 @@ class ExperimentRunner:
                 "protocol": protocol,
                 "duration_sec": config.duration_sec,
                 "target_bandwidth_mbps": config.bandwidth_mbps,
-            })
+                "target_latency_ms": config.latency_ms,
+                "target_packet_loss_pct": config.packet_loss_pct,
+                "throughput_mbps": self._throughput(protocol, config, config.duration_sec),
+            }, indent=2)
+            sim_file = RAW_RESULTS_DIR / f"{experiment.id}_{protocol}.json"
+            sim_file.write_text(simulated_raw, encoding="utf-8")
+            sim_paths.append(str(sim_file))
+
             session.add(Result(
                 experiment_id=experiment.id, protocol=protocol,
                 throughput_mbps=self._throughput(protocol, config, config.duration_sec),
@@ -191,6 +251,9 @@ class ExperimentRunner:
                 handshake_success=handshake_ok,
                 raw_output=simulated_raw,
             ))
+
+        if sim_paths:
+            experiment.raw_result_path = ";".join(sim_paths)
 
     @staticmethod
     def _throughput(protocol: str, config: ExperimentRequest, elapsed: int) -> float:
