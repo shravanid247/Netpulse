@@ -6,6 +6,7 @@ Skips gracefully if helper or sudo is unavailable.
 import json
 import os
 import subprocess
+import time
 import unittest
 from pathlib import Path
 
@@ -19,6 +20,9 @@ def helper_available() -> bool:
 @unittest.skipUnless(helper_available(), "Privileged helper /usr/local/libexec/netpulse-runner not available")
 class TestNetemMininetIntegration(unittest.TestCase):
     """Integration test suite executing real Mininet and Linux tc/netem tests."""
+
+    def tearDown(self) -> None:
+        time.sleep(1.0)
 
     def test_verify_connectivity(self):
         """Topology h1-s1-s2-h2 should start, ping h1<->h2, and clean up with 0% loss."""

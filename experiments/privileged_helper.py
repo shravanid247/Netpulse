@@ -306,6 +306,33 @@ def run_udp(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]
     }
 
 
+def _ensure_project_path() -> Path:
+    candidates = [
+        Path(os.environ.get("NETPULSE_ROOT", "")),
+        Path.cwd(),
+        Path(__file__).resolve().parents[1],
+    ]
+    for candidate in candidates:
+        if (candidate / "experiments" / "quic").is_dir():
+            if str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+            return candidate
+    raise RuntimeError("Unable to locate NetPulse project root for QUIC experiment")
+
+
+def run_quic(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]:
+    """Execute real QUIC test using aioquic benchmark client and server."""
+    _ensure_project_path()
+    from experiments.quic.run_quic_test import run_quic_test
+    return run_quic_test(
+        server_host=h2,
+        client_host=h1,
+        server_ip="10.0.0.2",
+        duration_sec=duration,
+        bandwidth_mbps=bandwidth,
+    )
+
+
 def resolve_safe_output_path(output_file: str | None, experiment_id: str, protocol: str) -> Path:
     """Resolve and validate destination output path to prevent directory traversal."""
     if output_file:
@@ -325,7 +352,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="NetPulse Privileged Mininet & Traffic Control Helper")
     parser.add_argument("--action", choices=["run", "verify", "cleanup", "ping", "impairment_test"], required=True)
     parser.add_argument("--experiment-id", type=str, default="test_exp")
-    parser.add_argument("--protocol", choices=["tcp", "udp"], default="tcp")
+    parser.add_argument("--protocol", choices=["tcp", "udp", "quic"], default="tcp")
     parser.add_argument("--duration", type=int, default=5)
     parser.add_argument("--bandwidth", type=float, default=100.0)
     parser.add_argument("--latency", type=float, default=0.0)
@@ -445,6 +472,8 @@ def main() -> None:
                 res = run_tcp(h1, h2, args.duration, args.bandwidth)
             elif args.protocol == "udp":
                 res = run_udp(h1, h2, args.duration, args.bandwidth)
+            elif args.protocol == "quic":
+                res = run_quic(h1, h2, args.duration, args.bandwidth)
             else:
                 raise ValueError(f"Unsupported protocol {args.protocol}")
 

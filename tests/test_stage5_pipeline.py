@@ -294,8 +294,8 @@ class TestStage5Pipeline(unittest.TestCase):
         self.assertIsNotNone(udp_result["raw_output"])
 
     @unittest.skipUnless(is_helper_ready(), "Privileged helper not available for real execution")
-    def test_05_controlled_failure_quic_unsupported(self) -> None:
-        """Verify requesting QUIC in real mode safely reports failure without fabricating measurements."""
+    def test_05_real_quic_execution_mode(self) -> None:
+        """Verify requesting QUIC in real mode executes real benchmark without fabricating measurements."""
         payload = {
             "protocols": ["quic"],
             "bandwidth_mbps": 10.0,
@@ -319,8 +319,13 @@ class TestStage5Pipeline(unittest.TestCase):
             if final_status in ("COMPLETE", "FAILED"):
                 break
 
-        self.assertEqual(final_status, "FAILED")
-        self.assertIn("QUIC protocol is currently unsupported in real execution mode", s_data.get("error", ""))
+        self.assertEqual(final_status, "COMPLETE")
+        r_code, r_data = http_request(f"http://127.0.0.1:{self.real_port}/experiment/results/{exp_id}")
+        self.assertEqual(r_code, 200)
+        self.assertEqual(len(r_data.get("results", [])), 1)
+        self.assertEqual(r_data["results"][0]["protocol"], "quic")
+        self.assertTrue(r_data["results"][0]["handshake_success"])
+        self.assertGreater(r_data["results"][0]["throughput_mbps"], 0.0)
 
         # Verify no orphaned experiment iperf3 processes remain (exclude host system daemon)
         pgrep = subprocess.run(["pgrep", "-u", f"root,{os.getlogin() if hasattr(os, 'getlogin') else 'kenrich'}", "iperf3"], capture_output=True, text=True)

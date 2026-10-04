@@ -102,12 +102,6 @@ class ExperimentRunner:
 
         try:
             for protocol in config.protocols:
-                if protocol == "quic":
-                    raise NotImplementedError(
-                        "QUIC protocol is currently unsupported in real execution mode "
-                        "(aioquic/dependencies not installed; fake measurements are strictly forbidden)"
-                    )
-
                 raw_file = RAW_RESULTS_DIR / f"{experiment.id}_{protocol}.json"
                 cmd = helper_base_cmd + [
                     "--action", "run",
@@ -124,6 +118,7 @@ class ExperimentRunner:
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    cwd=str(PROJECT_ROOT),
                 )
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -142,13 +137,19 @@ class ExperimentRunner:
                         logger.warning("iperf3 transient socket error for %s; cleaning and retrying once...", protocol)
                         cleanup_cmd = helper_base_cmd + ["--action", "cleanup"]
                         clean_retry = await asyncio.create_subprocess_exec(
-                            *cleanup_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                            *cleanup_cmd,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                            cwd=str(PROJECT_ROOT),
                         )
                         await asyncio.wait_for(clean_retry.wait(), timeout=15)
                         await asyncio.sleep(1.0)
 
                         retry_proc = await asyncio.create_subprocess_exec(
-                            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                            *cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            cwd=str(PROJECT_ROOT),
                         )
                         stdout_bytes, stderr_bytes = await asyncio.wait_for(
                             retry_proc.communicate(), timeout=max(45, config.duration_sec + 35)
@@ -165,13 +166,16 @@ class ExperimentRunner:
                     raise RuntimeError(f"Failed to parse helper output for {protocol}: {err}")
 
                 raw_output = result_data.get("raw_output")
+                loss_val = result_data.get("packet_loss_pct")
+                measured_loss = float(loss_val) if loss_val is not None else 0.0
+
                 result_obj = Result(
                     experiment_id=experiment.id,
                     protocol=protocol,
                     throughput_mbps=result_data.get("throughput_mbps", 0.0),
                     latency_ms=result_data.get("latency_ms", 0.0),
                     jitter_ms=result_data.get("jitter_ms"),
-                    packet_loss_pct=result_data.get("packet_loss_pct", 0.0),
+                    packet_loss_pct=measured_loss,
                     cpu_usage_pct=result_data.get("cpu_usage_pct", 0.0),
                     transfer_time_sec=result_data.get("transfer_time_sec", float(config.duration_sec)),
                     handshake_success=result_data.get("handshake_success"),
@@ -186,10 +190,10 @@ class ExperimentRunner:
                     protocol=protocol,
                     elapsed_sec=float(config.duration_sec),
                     packets_sent=int(result_data.get("throughput_mbps", 0.0) * 125000 * config.duration_sec),
-                    packets_received=int(result_data.get("throughput_mbps", 0.0) * 125000 * config.duration_sec * (1 - result_data.get("packet_loss_pct", 0.0) / 100)),
+                    packets_received=int(result_data.get("throughput_mbps", 0.0) * 125000 * config.duration_sec * (1 - measured_loss / 100)),
                     throughput_mbps=result_data.get("throughput_mbps", 0.0),
                     latency_ms=result_data.get("latency_ms", 0.0),
-                    packet_loss_pct=result_data.get("packet_loss_pct", 0.0),
+                    packet_loss_pct=measured_loss,
                 ))
 
             if saved_paths:
@@ -202,6 +206,7 @@ class ExperimentRunner:
                     *cleanup_cmd,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
+                    cwd=str(PROJECT_ROOT),
                 )
                 await asyncio.wait_for(clean_proc.wait(), timeout=15)
             except Exception as clean_err:
