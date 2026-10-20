@@ -100,6 +100,13 @@ class ExperimentRunner:
         saved_paths: list[str] = []
         helper_base_cmd = get_helper_command()
 
+        # If a dynamic topology is provided, write it to a JSON file and pass to the helper
+        topo_file_arg: list[str] = []
+        if config.topology is not None:
+            topo_file = RAW_RESULTS_DIR / f"{experiment.id}_topo.json"
+            topo_file.write_text(config.topology.model_dump_json(indent=2), encoding="utf-8")
+            topo_file_arg = ["--topology-file", str(topo_file)]
+
         try:
             for protocol in config.protocols:
                 raw_file = RAW_RESULTS_DIR / f"{experiment.id}_{protocol}.json"
@@ -112,7 +119,7 @@ class ExperimentRunner:
                     "--latency", str(config.latency_ms),
                     "--packet-loss", str(config.packet_loss_pct),
                     "--output-file", str(raw_file),
-                ]
+                ] + topo_file_arg
 
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -215,33 +222,59 @@ class ExperimentRunner:
             await asyncio.sleep(1.0)
 
     async def _run_simulation(self, experiment: Experiment, config: ExperimentRequest, session: Any) -> None:
-        """Run simulated experiment metrics."""
+        """Run simulated experiment metrics incorporating dynamic topology analysis."""
         RAW_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+        effective_bw = config.bandwidth_mbps
+        effective_lat = config.latency_ms
+        effective_loss = config.packet_loss_pct
+        path_info: dict[str, Any] = {}
+
+        if config.topology is not None:
+            topo_file = RAW_RESULTS_DIR / f"{experiment.id}_topo.json"
+            topo_file.write_text(config.topology.model_dump_json(indent=2), encoding="utf-8")
+            from network.topology import analyze_topology_path
+            try:
+                path_info = analyze_topology_path(
+                    config.topology.model_dump(),
+                    default_bandwidth=config.bandwidth_mbps,
+                    default_latency=config.latency_ms,
+                    default_loss=config.packet_loss_pct,
+                )
+                effective_bw = path_info.get("effective_bandwidth_mbps", config.bandwidth_mbps)
+                effective_lat = path_info.get("cumulative_latency_ms", config.latency_ms)
+                effective_loss = path_info.get("aggregate_loss_pct", config.packet_loss_pct)
+            except Exception as exc:
+                logger.warning("Could not analyze topology path, using global parameters: %s", exc)
+
         for elapsed in range(config.duration_sec + 1):
             if elapsed:
                 await asyncio.sleep(1)
             for protocol in config.protocols:
-                throughput = self._throughput(protocol, config, elapsed)
+                throughput = self._throughput(protocol, effective_bw, effective_lat, effective_loss, elapsed)
                 sent = int(max(1, throughput * 125000 * max(elapsed, 1)))
-                received = round(sent * (1 - config.packet_loss_pct / 100))
+                received = round(sent * (1 - effective_loss / 100))
                 await self.publish(experiment.id, MetricSnapshot(
                     experiment_id=experiment.id, protocol=protocol, elapsed_sec=elapsed,
                     packets_sent=sent, packets_received=received, throughput_mbps=throughput,
-                    latency_ms=config.latency_ms, packet_loss_pct=config.packet_loss_pct,
+                    latency_ms=effective_lat, packet_loss_pct=effective_loss,
                 ))
 
         sim_paths = []
         for protocol in config.protocols:
-            jitter = round(config.latency_ms * 0.08, 2) if protocol == "udp" else None
+            jitter = round(effective_lat * 0.08, 2) if protocol == "udp" else None
             handshake_ok = True if protocol == "quic" else None
             simulated_raw = json.dumps({
                 "mode": "simulation",
+                "simulated": True,
                 "protocol": protocol,
                 "duration_sec": config.duration_sec,
-                "target_bandwidth_mbps": config.bandwidth_mbps,
-                "target_latency_ms": config.latency_ms,
-                "target_packet_loss_pct": config.packet_loss_pct,
-                "throughput_mbps": self._throughput(protocol, config, config.duration_sec),
+                "effective_bandwidth_mbps": effective_bw,
+                "effective_latency_ms": effective_lat,
+                "effective_packet_loss_pct": effective_loss,
+                "throughput_mbps": self._throughput(protocol, effective_bw, effective_lat, effective_loss, config.duration_sec),
+                "topology_path": path_info.get("path_node_ids", []),
+                "hop_count": path_info.get("hop_count", 3),
             }, indent=2)
             sim_file = RAW_RESULTS_DIR / f"{experiment.id}_{protocol}.json"
             sim_file.write_text(simulated_raw, encoding="utf-8")
@@ -249,9 +282,9 @@ class ExperimentRunner:
 
             session.add(Result(
                 experiment_id=experiment.id, protocol=protocol,
-                throughput_mbps=self._throughput(protocol, config, config.duration_sec),
-                latency_ms=config.latency_ms, jitter_ms=jitter,
-                packet_loss_pct=config.packet_loss_pct, cpu_usage_pct=self._cpu(protocol, config),
+                throughput_mbps=self._throughput(protocol, effective_bw, effective_lat, effective_loss, config.duration_sec),
+                latency_ms=effective_lat, jitter_ms=jitter,
+                packet_loss_pct=effective_loss, cpu_usage_pct=self._cpu(protocol, effective_loss),
                 transfer_time_sec=float(config.duration_sec),
                 handshake_success=handshake_ok,
                 raw_output=simulated_raw,
@@ -261,15 +294,15 @@ class ExperimentRunner:
             experiment.raw_result_path = ";".join(sim_paths)
 
     @staticmethod
-    def _throughput(protocol: str, config: ExperimentRequest, elapsed: int) -> float:
+    def _throughput(protocol: str, bandwidth_mbps: float, latency_ms: float, packet_loss_pct: float, elapsed: int) -> float:
         efficiency = {"tcp": 0.82, "udp": 0.96, "quic": 0.90}.get(protocol, 0.80)
-        penalty = 1 - (config.packet_loss_pct / 130) - (config.latency_ms / 5000)
+        penalty = max(0.01, 1 - (packet_loss_pct / 130) - (latency_ms / 5000))
         warmup = min(1, 0.7 + elapsed * 0.1)
-        return round(max(0.1, config.bandwidth_mbps * efficiency * penalty * warmup), 2)
+        return round(max(0.1, bandwidth_mbps * efficiency * penalty * warmup), 2)
 
     @staticmethod
-    def _cpu(protocol: str, config: ExperimentRequest) -> float:
-        return round({"tcp": 18, "udp": 12, "quic": 28}.get(protocol, 15) + config.packet_loss_pct * 0.4, 2)
+    def _cpu(protocol: str, packet_loss_pct: float) -> float:
+        return round({"tcp": 18, "udp": 12, "quic": 28}.get(protocol, 15) + packet_loss_pct * 0.4, 2)
 
 
 runner = ExperimentRunner()

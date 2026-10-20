@@ -4,6 +4,28 @@
  */
 
 export type Protocol = 'tcp' | 'udp' | 'quic';
+export type NodeType = 'client' | 'switch' | 'server';
+
+export interface TopologyNode {
+  id: string;
+  label: string;
+  type: NodeType;
+}
+
+export interface TopologyEdge {
+  id: string;
+  source: string;
+  target: string;
+  protocol?: Protocol | null;
+  bandwidth_mbps?: number | null;
+  latency_ms?: number | null;
+  packet_loss_pct?: number | null;
+}
+
+export interface TopologySpec {
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+}
 
 export interface ExperimentConfig {
   protocols: Protocol[];
@@ -11,6 +33,7 @@ export interface ExperimentConfig {
   latency_ms: number;
   packet_loss_pct: number;
   duration_sec: number;
+  topology?: TopologySpec;
 }
 
 export interface PresetItem {

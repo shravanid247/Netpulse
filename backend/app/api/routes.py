@@ -116,6 +116,14 @@ def experiment_results(
     except Exception:
         protocols = [experiment.protocols]
 
+    topo_spec = None
+    topo_file = RAW_RESULTS_DIR / f"{experiment.id}_topo.json"
+    if topo_file.is_file():
+        try:
+            topo_spec = json.loads(topo_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
     return ExperimentResponse(
         experiment_id=experiment.id,
         status=experiment.status,
@@ -125,6 +133,7 @@ def experiment_results(
             latency_ms=experiment.latency_ms,
             packet_loss_pct=experiment.packet_loss_pct,
             duration_sec=experiment.duration_sec,
+            topology=topo_spec,
         ),
         results=[
             ResultResponse(

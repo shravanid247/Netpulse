@@ -194,7 +194,7 @@ def measure_ping(h1: Any, target_ip: str = "10.0.0.2", count: int = 5) -> dict[s
     }
 
 
-def run_tcp(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]:
+def run_tcp(h1: Any, h2: Any, duration: int, bandwidth: float, target_ip: str = "10.0.0.2") -> dict[str, Any]:
     """Execute real TCP test using system iperf3."""
     h2.cmd("killall -9 iperf3 2>/dev/null || true")
     h1.cmd("killall -9 iperf3 2>/dev/null || true")
@@ -208,7 +208,7 @@ def run_tcp(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]
     )
     time.sleep(0.8)
 
-    client_cmd = ["iperf3", "-c", "10.0.0.2", "-p", "5201", "-t", str(duration), "--json"]
+    client_cmd = ["iperf3", "-c", target_ip, "-p", "5201", "-t", str(duration), "--json"]
     if bandwidth > 0:
         client_cmd.extend(["-b", f"{bandwidth}M"])
 
@@ -253,7 +253,7 @@ def run_tcp(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]
     }
 
 
-def run_udp(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]:
+def run_udp(h1: Any, h2: Any, duration: int, bandwidth: float, target_ip: str = "10.0.0.2") -> dict[str, Any]:
     """Execute real UDP test using system iperf3."""
     h2.cmd("killall -9 iperf3 2>/dev/null || true")
     h1.cmd("killall -9 iperf3 2>/dev/null || true")
@@ -267,7 +267,7 @@ def run_udp(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]
     )
     time.sleep(1.2)
 
-    client_cmd = ["iperf3", "-c", "10.0.0.2", "-u", "-b", f"{bandwidth}M", "-p", "5201", "-t", str(duration), "--json"]
+    client_cmd = ["iperf3", "-c", target_ip, "-u", "-b", f"{bandwidth}M", "-p", "5201", "-t", str(duration), "--json"]
 
     try:
         client_proc = h1.popen(client_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -320,14 +320,14 @@ def _ensure_project_path() -> Path:
     raise RuntimeError("Unable to locate NetPulse project root for QUIC experiment")
 
 
-def run_quic(h1: Any, h2: Any, duration: int, bandwidth: float) -> dict[str, Any]:
+def run_quic(h1: Any, h2: Any, duration: int, bandwidth: float, target_ip: str = "10.0.0.2") -> dict[str, Any]:
     """Execute real QUIC test using aioquic benchmark client and server."""
     _ensure_project_path()
     from experiments.quic.run_quic_test import run_quic_test
     return run_quic_test(
         server_host=h2,
         client_host=h1,
-        server_ip="10.0.0.2",
+        server_ip=target_ip,
         duration_sec=duration,
         bandwidth_mbps=bandwidth,
     )
@@ -358,6 +358,7 @@ def main() -> None:
     parser.add_argument("--latency", type=float, default=0.0)
     parser.add_argument("--packet-loss", type=float, default=0.0)
     parser.add_argument("--output-file", type=str, default=None)
+    parser.add_argument("--topology-file", type=str, default=None, help="Path to validated JSON topology specification")
 
     args = parser.parse_args()
 
@@ -386,20 +387,47 @@ def main() -> None:
         print(json.dumps({"success": True, "action": "cleanup"}))
         sys.exit(0)
 
+    # Optional dynamic topology spec from file
+    topo_spec = None
+    if args.topology_file:
+        topo_path = Path(args.topology_file).resolve()
+        if not topo_path.is_file():
+            print(json.dumps({"success": False, "error": f"Topology file not found: {topo_path}"}), file=sys.stderr)
+            sys.exit(1)
+        try:
+            topo_spec = json.loads(topo_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(json.dumps({"success": False, "error": f"Failed to parse topology JSON: {exc}"}), file=sys.stderr)
+            sys.exit(1)
+
     net = None
+    impaired_interfaces = INTERSWITCH_INTERFACES
     try:
-        net = build_net()
-        net.start()
-        h1, h2 = net.get("h1"), net.get("h2")
-        s1, s2 = net.get("s1"), net.get("s2")
+        _ensure_project_path()
+        if topo_spec:
+            from network.topology import build_dynamic_topology, get_dynamic_bottleneck_interfaces
+            net, topo_meta = build_dynamic_topology(topo_spec)
+            net.start()
+            client_node = net.get(topo_meta["primary_client"])
+            server_node = net.get(topo_meta["primary_server"])
+            target_ip = topo_meta["primary_server_ip"]
+            impaired_interfaces = get_dynamic_bottleneck_interfaces(net, topo_meta) or INTERSWITCH_INTERFACES
+            node_names = list(topo_meta.get("sanitized_map", {}).values())
+        else:
+            net = build_net()
+            net.start()
+            client_node, server_node = net.get("h1"), net.get("h2")
+            target_ip = "10.0.0.2"
+            impaired_interfaces = INTERSWITCH_INTERFACES
+            node_names = ["h1", "h2", "s1", "s2"]
 
         if args.action == "verify":
-            ping_loss = net.ping(hosts=[h1, h2], timeout="1")
+            ping_loss = net.ping(hosts=[client_node, server_node], timeout="1")
             res = {
                 "success": ping_loss == 0.0,
                 "action": "verify",
                 "ping_loss": ping_loss,
-                "nodes": ["h1", "h2", "s1", "s2"],
+                "nodes": node_names,
             }
             print(json.dumps(res, indent=2))
             sys.exit(0 if ping_loss == 0.0 else 1)
@@ -410,8 +438,9 @@ def main() -> None:
                     bandwidth_mbps=args.bandwidth,
                     latency_ms=args.latency,
                     packet_loss_pct=args.packet_loss,
+                    interfaces=impaired_interfaces,
                 )
-            ping_res = measure_ping(h1, target_ip="10.0.0.2", count=5)
+            ping_res = measure_ping(client_node, target_ip=target_ip, count=5)
             ping_res["action"] = "ping"
             ping_res["target_latency_ms"] = args.latency
             ping_res["target_loss_pct"] = args.packet_loss
@@ -420,24 +449,25 @@ def main() -> None:
 
         elif args.action == "impairment_test":
             # Establish baseline ping
-            baseline_ping = measure_ping(h1, "10.0.0.2", count=3)
-            qdisc_before = {intf: show_qdisc(intf) for intf in INTERSWITCH_INTERFACES}
+            baseline_ping = measure_ping(client_node, target_ip=target_ip, count=3)
+            qdisc_before = {intf: show_qdisc(intf) for intf in impaired_interfaces}
 
             # Apply impairment
             apply_topology_impairment(
                 bandwidth_mbps=args.bandwidth,
                 latency_ms=args.latency,
                 packet_loss_pct=args.packet_loss,
+                interfaces=impaired_interfaces,
             )
-            qdisc_impaired = {intf: show_qdisc(intf) for intf in INTERSWITCH_INTERFACES}
+            qdisc_impaired = {intf: show_qdisc(intf) for intf in impaired_interfaces}
 
             # Measure under impairment
-            impaired_ping = measure_ping(h1, "10.0.0.2", count=5)
+            impaired_ping = measure_ping(client_node, target_ip=target_ip, count=5)
 
             # Reset impairment
-            reset_topology_impairment()
-            qdisc_after = {intf: show_qdisc(intf) for intf in INTERSWITCH_INTERFACES}
-            restored_ping = measure_ping(h1, "10.0.0.2", count=3)
+            reset_topology_impairment(interfaces=impaired_interfaces)
+            qdisc_after = {intf: show_qdisc(intf) for intf in impaired_interfaces}
+            restored_ping = measure_ping(client_node, target_ip=target_ip, count=3)
 
             res = {
                 "success": True,
@@ -463,17 +493,18 @@ def main() -> None:
                 bandwidth_mbps=args.bandwidth,
                 latency_ms=args.latency,
                 packet_loss_pct=args.packet_loss,
+                interfaces=impaired_interfaces,
             )
 
             # Measure ICMP RTT for ground-truth latency reporting
-            ping_res = measure_ping(h1, "10.0.0.2", count=3)
+            ping_res = measure_ping(client_node, target_ip=target_ip, count=3)
 
             if args.protocol == "tcp":
-                res = run_tcp(h1, h2, args.duration, args.bandwidth)
+                res = run_tcp(client_node, server_node, args.duration, args.bandwidth, target_ip=target_ip)
             elif args.protocol == "udp":
-                res = run_udp(h1, h2, args.duration, args.bandwidth)
+                res = run_udp(client_node, server_node, args.duration, args.bandwidth, target_ip=target_ip)
             elif args.protocol == "quic":
-                res = run_quic(h1, h2, args.duration, args.bandwidth)
+                res = run_quic(client_node, server_node, args.duration, args.bandwidth, target_ip=target_ip)
             else:
                 raise ValueError(f"Unsupported protocol {args.protocol}")
 
