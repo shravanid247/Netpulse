@@ -1,7 +1,92 @@
+import re
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Protocol = Literal["tcp", "udp", "quic"]
+NodeType = Literal["client", "switch", "server"]
+
+SAFE_IDENTIFIER_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.]{1,64}$")
+
+class TopologyNode(BaseModel):
+    id: str = Field(min_length=1, max_length=64, description="Unique node identifier")
+    label: str = Field(min_length=1, max_length=64, description="Display label")
+    type: NodeType = Field(description="Node role: client, switch, or server")
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, v: str) -> str:
+        v = v.strip()
+        if not SAFE_IDENTIFIER_REGEX.match(v):
+            raise ValueError(f"Invalid node ID '{v}'. Must be alphanumeric with hyphens, underscores, or dots.")
+        return v
+
+class TopologyEdge(BaseModel):
+    id: str = Field(min_length=1, max_length=64, description="Unique edge identifier")
+    source: str = Field(min_length=1, max_length=64, description="Source node ID")
+    target: str = Field(min_length=1, max_length=64, description="Target node ID")
+    protocol: Protocol | None = Field(default=None, description="Transport protocol for this link")
+    bandwidth_mbps: float | None = Field(default=None, gt=0, le=10000, description="Link bandwidth override in Mbps")
+    latency_ms: float | None = Field(default=None, ge=0, le=5000, description="Link latency override in ms")
+    packet_loss_pct: float | None = Field(default=None, ge=0, le=100, description="Link loss override percentage")
+
+class TopologySpec(BaseModel):
+    nodes: list[TopologyNode] = Field(min_length=2, max_length=25, description="Network nodes in graph")
+    edges: list[TopologyEdge] = Field(min_length=1, max_length=40, description="Links between nodes")
+
+    @field_validator("nodes")
+    @classmethod
+    def validate_nodes(cls, nodes: list[TopologyNode]) -> list[TopologyNode]:
+        ids = [n.id for n in nodes]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate node IDs found in topology specification")
+        types = {n.type for n in nodes}
+        if "client" not in types:
+            raise ValueError("Topology must contain at least one client host (traffic generator)")
+        if "server" not in types:
+            raise ValueError("Topology must contain at least one server host (traffic receiver)")
+        return nodes
+
+    @model_validator(mode="after")
+    def validate_graph_connectivity(self) -> "TopologySpec":
+        node_ids = {n.id for n in self.nodes}
+        for edge in self.edges:
+            if edge.source not in node_ids:
+                raise ValueError(f"Edge source '{edge.source}' does not exist in topology nodes")
+            if edge.target not in node_ids:
+                raise ValueError(f"Edge target '{edge.target}' does not exist in topology nodes")
+            if edge.source == edge.target:
+                raise ValueError(f"Self-loop detected on edge '{edge.id}' ({edge.source} -> {edge.target})")
+
+        # Build adjacency graph for undirected traversal
+        adj: dict[str, set[str]] = {n.id: set() for n in self.nodes}
+        for edge in self.edges:
+            adj[edge.source].add(edge.target)
+            adj[edge.target].add(edge.source)
+
+        # Check path from at least one client to at least one server
+        clients = [n.id for n in self.nodes if n.type == "client"]
+        servers = {n.id for n in self.nodes if n.type == "server"}
+
+        path_found = False
+        for client in clients:
+            visited = set()
+            queue = [client]
+            while queue:
+                curr = queue.pop(0)
+                if curr in servers:
+                    path_found = True
+                    break
+                visited.add(curr)
+                for neighbor in adj.get(curr, set()):
+                    if neighbor not in visited and neighbor not in queue:
+                        queue.append(neighbor)
+            if path_found:
+                break
+
+        if not path_found:
+            raise ValueError("No connected path found between any client host and server host in topology")
+
+        return self
 
 class ExperimentRequest(BaseModel):
     protocols: list[Protocol] = Field(min_length=1, description="List of protocols to evaluate")
@@ -9,6 +94,7 @@ class ExperimentRequest(BaseModel):
     latency_ms: float = Field(ge=0, le=5000, description="Latency in ms")
     packet_loss_pct: float = Field(ge=0, le=100, description="Packet loss percentage")
     duration_sec: int = Field(ge=1, le=3600, description="Duration in seconds")
+    topology: TopologySpec | None = Field(default=None, description="Dynamic network topology specification")
 
     @field_validator("protocols")
     @classmethod

@@ -9,8 +9,11 @@
 .toolbox-note { display:flex; align-items:center; gap:7px; margin-top:15px; color:var(--color-ink-muted); font:9px 'DM Mono'; text-transform:uppercase; letter-spacing:.06em; }
 .simulation-toolbar { position:absolute; z-index:6; top:16px; left:210px; right:16px; display:flex; align-items:center; gap:8px; min-height:43px; padding:6px 10px; background:rgba(30,30,30,.94); border:1px solid var(--color-line); }
 .simulation-run { display:flex; align-items:center; gap:8px; border:1px solid var(--color-primary); background:var(--color-primary); color:var(--color-on-primary,#000); padding:9px 13px; font:10px 'DM Mono'; letter-spacing:.08em; }
+.simulation-run:disabled { opacity:0.85; cursor:not-allowed; }
 .toolbar-divider { width:1px; height:22px; background:var(--color-line); margin:0 4px; } .toolbar-icon { color:var(--color-secondary); } .toolbar-label { color:var(--color-ink-muted); font:9px 'DM Mono'; letter-spacing:.07em; }
 .speed-button { border:1px solid var(--color-line); background:transparent; padding:8px 10px; color:var(--color-ink-muted); font:10px 'DM Mono'; } .speed-button.active,.speed-button:hover { border-color:var(--color-secondary); color:var(--color-secondary); background:rgba(75,199,255,.08); }
+.toolbar-status { display:flex; align-items:center; gap:8px; margin-left:auto; }
+.toolbar-error { display:flex; align-items:center; gap:6px; padding:4px 8px; background:rgba(224,106,139,.15); border:1px solid var(--color-error,#E06A8B); color:var(--color-error,#E06A8B); font-size:11px; font-family:'DM Mono',monospace; }
 .device-node { position:relative; display:flex; flex-direction:column; align-items:center; width:112px; padding:10px 9px 9px; border:1px solid var(--node-color); background:var(--color-bg-alt); color:var(--color-ink); filter:drop-shadow(0 0 7px color-mix(in srgb, var(--node-color) 30%, transparent)); transition:transform .2s,filter .2s; }
 .device-node:hover,.device-node.selected { transform:translateY(-2px); filter:drop-shadow(0 0 12px color-mix(in srgb, var(--node-color) 60%, transparent)); }
 .device-icon { display:grid; place-items:center; width:58px; height:58px; margin-bottom:8px; color:var(--node-color); background:var(--color-bg-alt-2); border:1px solid color-mix(in srgb, var(--node-color) 60%, transparent); }
